@@ -45,6 +45,11 @@ const chain = kiteChainByName(env("KITE_NETWORK", "testnet"));
 const upstream = new URL(env("UPSTREAM_URL") || "invalid://");
 if (!/^https?:$/.test(upstream.protocol)) throw new Error("UPSTREAM_URL is required, e.g. https://coins.llama.fi");
 
+// Bail out of upstream calls that hang instead of tying up a Render connection.
+const UPSTREAM_TIMEOUT_MS = Number(env("UPSTREAM_TIMEOUT_MS", "9000"));
+// Guard against abusive requests that ask for an unbounded number of coins.
+const MAX_COINS = Number(env("MAX_COINS", "50"));
+
 // Tiered pricing. DeFiLlama is itself free, so the split reflects *value*: a
 // single live snapshot is cheap; server-computed conversion/portfolio and the
 // historical time-series (larger payload) are premium.
@@ -100,26 +105,39 @@ app.disable("x-powered-by");
 app.set("trust proxy", 1);
 // Parse JSON request bodies for the POST /v1/portfolio endpoint. GET requests
 // carry no body, so this is a harmless no-op for them.
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+
+// CORS: let browser-based x402 clients (and the Kite Passport web agent) call
+// the paid endpoints and send the X-PAYMENT header. Only the HTTP layer is
+// opened — the 402 challenge and paid responses stay gated by x402.
+app.use((_req, res, next) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type,X-PAYMENT");
+  res.set("Access-Control-Expose-Headers", "payment-required,x-payment-response");
+  if (_req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 
 // ---------------------------------------------------------------------------
-// Read-through cache. Live prices move constantly, so `price` is cached briefly
-// (60s, near real-time); the `history` time-series is immutable, so it is
-// cached long (30d). Payment still happens per request — caching only reduces
-// upstream traffic, never the charge.
+// Read-through cache (server-side only). Live prices move constantly, so `price`
+// is cached briefly (60s, near real-time); the `history` time-series is
+// immutable, so it is cached long (30d). Payment still happens per request —
+// caching only reduces upstream traffic, never the charge. Because each paid
+// request must be re-paid, paid 200 responses are marked `Cache-Control:
+// no-store` so clients never replay a 200 and skip the next payment.
 // ---------------------------------------------------------------------------
 interface CacheEntry {
   at: number;
   ttl: number;
   status: number;
-  headers: Record<string, string>;
   body: Buffer;
 }
 const cache = new Map<string, CacheEntry>();
 const CACHE_MAX = 200;
-const HOP_BY_HOP = new Set([
-  "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "host", "content-length",
-]);
 
 function cacheKey(method: string, url: string): string {
   return `${method} ${url}`;
@@ -145,9 +163,20 @@ function setCache(key: string, entry: CacheEntry): void {
   cache.set(key, entry);
 }
 
+/** fetch with a hard timeout so a hung upstream can't occupy a connection. */
+async function fetchWithTimeout(target: URL, init: RequestInit = {}): Promise<globalThis.Response> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
+  try {
+    return await fetch(target, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /** Forward a request to the upstream and return the response. Exported for tests. */
 export async function fetchUpstream(target: URL, headers: Headers, method: string, body?: ReadableStream<Uint8Array>): Promise<globalThis.Response> {
-  return fetch(target, {
+  return fetchWithTimeout(target, {
     method,
     headers,
     body: body as unknown as BodyInit | undefined,
@@ -167,20 +196,17 @@ async function fetchJsonCached(target: URL, kind: "price" | "history"): Promise<
   }
   let res: globalThis.Response;
   try {
-    res = await fetch(target);
+    res = await fetchWithTimeout(target);
   } catch (err) {
-    throw new Error(`upstream unreachable: ${String(err)}`);
+    const aborted = err instanceof Error && (err.name === "AbortError" || /abort/i.test(err.message));
+    throw new Error(aborted ? `upstream timeout after ${UPSTREAM_TIMEOUT_MS}ms` : `upstream unreachable: ${String(err)}`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
   if (res.status !== 200) {
     throw new Error(`upstream returned ${res.status}`);
   }
   const json = JSON.parse(buf.toString("utf8"));
-  const h: Record<string, string> = {};
-  res.headers.forEach((v, k) => {
-    if (!HOP_BY_HOP.has(k.toLowerCase()) && k !== "content-encoding") h[k] = v;
-  });
-  setCache(key, { at: Date.now(), ttl: ttlForKind(kind), status: 200, headers: h, body: buf });
+  setCache(key, { at: Date.now(), ttl: ttlForKind(kind), status: 200, body: buf });
   return json;
 }
 
@@ -247,6 +273,10 @@ export async function handlePrice(req: Request, res: Response): Promise<void> {
     return;
   }
   const ids = parseCoins(coinsRaw);
+  if (ids.length > MAX_COINS) {
+    res.status(400).json({ error: `too many coins: ${ids.length} (max ${MAX_COINS})` });
+    return;
+  }
   const target = new URL(`/prices/current/${ids.join(",")}`, upstream);
   let json: any;
   try {
@@ -269,6 +299,10 @@ export async function handleHistory(req: Request, res: Response): Promise<void> 
   }
   const span = Math.min(Math.max(Number(req.query.span ?? "30") || 30, 1), 365);
   const ids = parseCoins(coinsRaw);
+  if (ids.length > MAX_COINS) {
+    res.status(400).json({ error: `too many coins: ${ids.length} (max ${MAX_COINS})` });
+    return;
+  }
   const target = new URL(`/chart/${ids.join(",")}?span=${span}`, upstream);
   let json: any;
   try {
@@ -291,11 +325,6 @@ export async function handleConvert(req: Request, res: Response): Promise<void> 
     res.status(400).json({ error: "from, to (coin ids) and a positive numeric amount are required" });
     return;
   }
-  if (from === to) {
-    res.status(200).json({ from, to, amount, rate: 1, converted: amount, usdValue: computeValue(amount, 0), prices: {} });
-    return;
-  }
-
   const ids = [`coingecko:${from}`, `coingecko:${to}`];
   const target = new URL(`/prices/current/${ids.join(",")}`, upstream);
   let json: any;
@@ -338,6 +367,10 @@ export async function handlePortfolio(req: Request, res: Response): Promise<void
     .filter((h) => h.coin && Number.isFinite(h.amount) && h.amount >= 0);
   if (clean.length === 0) {
     res.status(400).json({ error: "no valid holdings (need { coin, amount }) found" });
+    return;
+  }
+  if (clean.length > MAX_COINS) {
+    res.status(400).json({ error: `too many holdings: ${clean.length} (max ${MAX_COINS})` });
     return;
   }
   const ids = clean.map((h) => `coingecko:${h.coin}`);
@@ -413,6 +446,14 @@ app.use(
     resourceServer,
   ),
 );
+
+// Paid 200 responses must not be cached by clients, or they'd replay a 200 and
+// skip the next payment. (Server-side caching of the upstream data still
+// applies upstream of this.) Runs only when the payment gate calls next().
+app.use((_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
 // 4. Paid handlers. Rate limiting is applied here (after the gate), so only paid
 //    calls consume the limit. No catch-all: each endpoint is its own route.

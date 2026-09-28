@@ -181,3 +181,17 @@ describe("fetchUpstream", () => {
     expect(seen.headers["x-test"]).toBe("1");
   });
 });
+
+describe("CORS", () => {
+  it("answers OPTIONS preflight with 204 + CORS headers on paid routes", async () => {
+    const r = await request(app).options("/v1/price");
+    expect(r.status).toBe(204);
+    expect(r.headers["access-control-allow-origin"]).toBe("*");
+    expect(r.headers["access-control-allow-headers"]).toContain("X-PAYMENT");
+  });
+  it("exposes CORS headers on the 402 challenge", async () => {
+    const r = await request(app).get("/v1/price?coins=bitcoin");
+    expect(r.headers["access-control-allow-origin"]).toBe("*");
+    expect(r.headers["access-control-expose-headers"]).toContain("payment-required");
+  });
+});
