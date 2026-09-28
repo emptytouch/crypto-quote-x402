@@ -9,10 +9,10 @@ testnet key holding pieUSD.
 
 | Endpoint | Tier | Price | Tx hash | Buyer |
 |---|---|---|---|---|
-| `GET /v1/price` | standard | $0.001 | _(run `npm run selfpay`)_ | |
-| `GET /v1/convert` | premium | $0.01 | _(run `npm run selfpay`)_ | |
-| `POST /v1/portfolio` | premium | $0.01 | _(run `npm run selfpay`)_ | |
-| `GET /v1/history` | premium | $0.01 | _(run `npm run selfpay`)_ | |
+| `GET /v1/price` | standard | $0.001 | 0x755cfeeb36bd8b29d6a1c8935e7e9076539fc0b31baa6d52720fc611be2faad4 | 0x92DF53ED56E3baCc6b9F2b1E10ACdA5355Fbf9C9 |
+| `GET /v1/convert` | premium | $0.01 | 0xa5f6f67dfd6b6ad3be2f4443137aa4e7499e7e616a2e215a590de8c2daded84a | 0x92DF53ED56E3baCc6b9F2b1E10ACdA5355Fbf9C9 |
+| `POST /v1/portfolio` | premium | $0.01 | 0x775689314d8db3d609f0e241a1ed7d5debc42e7918cb6f62bad49eb2388c3047 | 0x92DF53ED56E3baCc6b9F2b1E10ACdA5355Fbf9C9 |
+| `GET /v1/history` | premium | $0.01 | 0x35ac542c5787147201ceaaacb479efbee56285a8fd6e916a35793d82928dba89 | 0x92DF53ED56E3baCc6b9F2b1E10ACdA5355Fbf9C9 |
 
 ## How to (re)generate proof after a deploy
 
