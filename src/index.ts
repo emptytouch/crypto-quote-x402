@@ -395,6 +395,19 @@ export async function handlePortfolio(req: Request, res: Response): Promise<void
   res.status(200).json({ totalUsd: Number(total.toFixed(2)), positions, missing });
 }
 
+// Captured once at boot so /healthz can report uptime for ops/debugging.
+const startedAt = Date.now();
+
+// Structured, machine-readable endpoint catalogue — lets a buyer/client see the
+// exact method + path + price per tier. The `tiers` object is the human-facing
+// description; this is the programmatic one.
+const endpoints = {
+  price: { method: "GET", path: "/v1/price", price: stdPrice, description: "real-time token prices (standard)" },
+  convert: { method: "GET", path: "/v1/convert", price: premiumPrice, description: "server-computed cross conversion (premium)" },
+  portfolio: { method: "POST", path: "/v1/portfolio", price: premiumPrice, description: "server-aggregated portfolio valuation (premium)" },
+  history: { method: "GET", path: "/v1/history", price: premiumPrice, description: "historical price time-series (premium)" },
+};
+
 const tiers = {
   price: { endpoint: "GET /v1/price", price: stdPrice, description: "real-time token prices (standard)" },
   convert: { endpoint: "GET /v1/convert", price: premiumPrice, description: "server-computed cross conversion (premium)" },
@@ -412,8 +425,11 @@ app.get("/healthz", (_req, res) => {
     payTo,
     upstream: upstream.origin,
     tiers,
+    endpoints,
     rateLimitPerMin: ratePerMin,
     cache: { enabled: true, maxEntries: CACHE_MAX },
+    startedAt,
+    uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
   });
 });
 
